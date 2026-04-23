@@ -113,7 +113,12 @@ def _build_universe_table(snapshots: Dict[str, Dict]) -> str:
     return "\n".join(rows)
 
 
-async def _call_claude(prompt: str) -> Optional[Dict]:
+def _token_budget_for_universe_size(n: int) -> int:
+    """Scale output budget with universe size. 120 tokens per ticker + buffer."""
+    return max(4000, min(16000, n * 120 + 400))
+
+
+async def _call_claude(prompt: str, token_budget: int = 4000) -> Optional[Dict]:
     if not config.ANTHROPIC_API_KEY:
         return None
     started = time.time()
@@ -128,20 +133,28 @@ async def _call_claude(prompt: str) -> Optional[Dict]:
                 },
                 json={
                     "model": config.ANTHROPIC_MODEL,
-                    "max_tokens": 4000,
+                    "max_tokens": token_budget,
                     "messages": [{"role": "user", "content": prompt}],
                 },
             )
             r.raise_for_status()
             text = r.json()["content"][0]["text"]
-            logger.info(f"Claude responded in {time.time()-started:.1f}s ({len(text)} chars)")
+            logger.info(f"Claude responded in {time.time()-started:.1f}s ({len(text)} chars, budget={token_budget})")
             return _parse_json(text)
+    except httpx.HTTPStatusError as e:
+        body = ""
+        try:
+            body = e.response.text[:300]
+        except Exception:
+            pass
+        logger.error(f"Claude call failed: HTTP {e.response.status_code if e.response else '?'} body={body!r}")
+        return None
     except Exception as e:
-        logger.error(f"Claude call failed: {e}")
+        logger.error(f"Claude call failed: {type(e).__name__}: {e!r}")
         return None
 
 
-async def _call_gpt(prompt: str) -> Optional[Dict]:
+async def _call_gpt(prompt: str, token_budget: int = 4000) -> Optional[Dict]:
     if not config.OPENAI_API_KEY:
         return None
     started = time.time()
@@ -155,17 +168,25 @@ async def _call_gpt(prompt: str) -> Optional[Dict]:
                 },
                 json={
                     "model": config.OPENAI_MODEL,
-                    "max_completion_tokens": 4000,
+                    "max_completion_tokens": token_budget,
                     "messages": [{"role": "user", "content": prompt}],
                     "response_format": {"type": "json_object"},
                 },
             )
             r.raise_for_status()
             text = r.json()["choices"][0]["message"]["content"]
-            logger.info(f"GPT responded in {time.time()-started:.1f}s ({len(text)} chars)")
+            logger.info(f"GPT responded in {time.time()-started:.1f}s ({len(text)} chars, budget={token_budget})")
             return _parse_json(text)
+    except httpx.HTTPStatusError as e:
+        body = ""
+        try:
+            body = e.response.text[:500]
+        except Exception:
+            pass
+        logger.error(f"GPT call failed: HTTP {e.response.status_code if e.response else '?'} body={body!r}")
+        return None
     except Exception as e:
-        logger.error(f"GPT call failed: {e}")
+        logger.error(f"GPT call failed: {type(e).__name__}: {e!r}")
         return None
 
 
@@ -309,8 +330,11 @@ async def run_consensus(
         options_flow_block=options_flow_block.strip() or "(no options flow data this session)",
     )
 
+    # Scale output token budget with universe size to avoid truncation.
+    token_budget = _token_budget_for_universe_size(n)
     claude_payload, gpt_payload = await asyncio.gather(
-        _call_claude(prompt), _call_gpt(prompt)
+        _call_claude(prompt, token_budget=token_budget),
+        _call_gpt(prompt, token_budget=token_budget),
     )
     claude_votes = _vote_map(claude_payload)
     gpt_votes = _vote_map(gpt_payload)
