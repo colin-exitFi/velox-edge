@@ -22,7 +22,7 @@ from loguru import logger
 
 from velox_edge import (
     broker, config, consensus, game_film, market_brief, ratchet, review,
-    scanner, sizing, state,
+    scanner, sizing, state, unusual_whales,
 )
 from velox_edge.universe import UNIVERSE
 
@@ -125,7 +125,18 @@ async def run_session(label: str):
         error=brief.error,
     )
 
-    # 2. Two voters now decide with context — both the brief AND the scanner overlay.
+    # 2a. Pull UW options-flow context for scanner candidates (Edge-only).
+    # Skips silently if UW token absent or call fails.
+    flow_block = ""
+    if config.UW_API_ENABLED and scan["tickers"]:
+        try:
+            flow_block = await unusual_whales.get_flow_block(
+                scan["tickers"][:20], hours_back=4
+            )
+        except Exception as e:
+            logger.warning(f"UW flow pull failed: {e}")
+
+    # 2b. Two voters now decide with full context: brief + scanner + UW flow.
     votes_by_symbol = await consensus.run_consensus(
         snapshots=snaps,
         open_positions=open_symbols,
@@ -134,6 +145,7 @@ async def run_session(label: str):
         max_positions=config.MAX_CONCURRENT_POSITIONS,
         market_brief=brief.text,
         scanner_details=scan["details"],
+        options_flow_block=flow_block,
     )
 
     opened = 0

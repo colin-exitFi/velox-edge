@@ -46,6 +46,12 @@ ALPACA_DATA_URL = "https://data.alpaca.markets"
 ANTHROPIC_API_KEY = _str("ANTHROPIC_API_KEY")
 OPENAI_API_KEY = _str("OPENAI_API_KEY")
 PERPLEXITY_API_KEY = _str("PERPLEXITY_API_KEY")
+
+# Unusual Whales — options flow context for the contrarian voters.
+# Edge uses this to distinguish retail FOMO (fade signal) from
+# institutional sweeps (don't fade — smart money's leading the move).
+UW_API_TOKEN = _str("UW_API_TOKEN")
+UW_API_ENABLED = _bool("UW_API_ENABLED", bool(UW_API_TOKEN))
 # Defaults updated 2026-04-22 to current top-tier models.
 # Claude Opus 4.7 + GPT-5.4 are the "voters" in the consensus.
 # Perplexity sonar-pro is the "context layer" — runs once per session, injects

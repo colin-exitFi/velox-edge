@@ -51,6 +51,16 @@ Already held ({n_open} total): {position_list}
 {market_brief}
 ═══════════════════════════════════════════════════════════
 
+═══ OPTIONS FLOW (Unusual Whales, last 4h on scanner candidates) ═══
+{options_flow_block}
+
+How to read this:
+  • >60% calls + 'mostly retail' → classic dumb-money pile, strong fade signal
+  • >60% calls + 'institutional sweeps' → smart money buying, DON'T fade
+  • >60% puts + 'institutional sweeps' → smart money positioning short, lean SHORT
+  • Balanced or low total premium → no edge from flow, decide on technicals
+═══════════════════════════════════════════════════════════════════════
+
 Universe snapshot — almost ALL of these are today's most-moved names. That's
 the whole point. They're here BECAUSE the crowd is on them right now. Your
 job is to look for the ones where the crowd is most likely wrong.
@@ -252,6 +262,7 @@ async def run_consensus(
     max_positions: int,
     market_brief: str = "",
     scanner_details: Optional[List[Dict]] = None,
+    options_flow_block: str = "",
 ) -> Dict[str, Dict]:
     """Call both models, return per-symbol consensus dict.
 
@@ -295,6 +306,7 @@ async def run_consensus(
         universe_table=universe_table,
         max_positions=max_positions,
         market_brief=market_brief.strip() or "(no brief available; vote on technicals only)",
+        options_flow_block=options_flow_block.strip() or "(no options flow data this session)",
     )
 
     claude_payload, gpt_payload = await asyncio.gather(
