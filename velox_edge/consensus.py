@@ -24,7 +24,7 @@ from loguru import logger
 from velox_edge import config
 
 
-_TIMEOUT = httpx.Timeout(45.0, connect=10.0)
+_TIMEOUT = httpx.Timeout(150.0, connect=10.0)
 _VALID_ACTIONS = {"BUY", "SHORT", "HOLD", "EXIT"}
 
 
