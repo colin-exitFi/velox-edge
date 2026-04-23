@@ -180,6 +180,30 @@ async def api_daily_review(request: Request):
     }
 
 
+@app.get("/api/game-film")
+async def api_game_film(request: Request, live: bool = False):
+    """Return latest persisted game film snapshot.
+
+    If live=true (or no snapshot exists), recompute on the fly from current DB.
+    Useful when you want fresh stats between scheduled runs.
+    """
+    _check_token(request)
+    from velox_edge import game_film as gf
+    if live:
+        return {"available": True, "live": True, "insights": gf.compute_game_film(lookback_days=30)}
+    snap = state.latest_game_film()
+    if not snap:
+        # Fall back to live computation if nothing persisted yet
+        live_data = gf.compute_game_film(lookback_days=30)
+        return {"available": True, "live": True, "insights": live_data}
+    return {
+        "available": True,
+        "live": False,
+        "timestamp": snap["timestamp"],
+        "insights": snap.get("insights", {}),
+    }
+
+
 # ── The single HTML page ───────────────────────────────────────────
 
 
@@ -208,7 +232,7 @@ HTML = """<!DOCTYPE html>
     --ink:      #ece6d8;           /* warm ivory primary text */
     --ink-soft: #aaa39a;
     --ink-mute: #6e6a62;
-    --gold:     #d97a4a;          /* Edge: copper / hunter's brass — sharper than vanilla gold */
+    --gold:     #d97a4a;          /* Edge: copper / hunters brass */
     --gold-soft: rgba(217, 122, 74, 0.15);
     --win:      #7fb491;           /* muted forest */
     --win-soft: rgba(127, 180, 145, 0.12);
@@ -644,6 +668,87 @@ HTML = """<!DOCTYPE html>
     padding: 36px 0;
   }
 
+  /* ─── Game film ──────────────────────────────────────────── */
+  .gf-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 28px;
+    margin-bottom: 32px;
+  }
+  @media (max-width: 800px) { .gf-grid { grid-template-columns: 1fr; } }
+  .gf-block {
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 2px;
+    padding: 22px 24px;
+  }
+  .gf-block-title {
+    font-family: var(--sans);
+    font-size: 11px;
+    color: var(--ink-mute);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-loose);
+    margin-bottom: 16px;
+  }
+  .gf-bucket-row {
+    display: grid;
+    grid-template-columns: 1fr 50px 50px 80px;
+    gap: 12px;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--hairline);
+    font-size: 12px;
+    align-items: baseline;
+  }
+  .gf-bucket-row:last-child { border-bottom: none; }
+  .gf-bucket-name {
+    font-family: var(--serif);
+    font-size: 13px;
+    color: var(--ink);
+    letter-spacing: -0.005em;
+  }
+  .gf-bucket-stat {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-soft);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .gf-bucket-stat.win { color: var(--win); }
+  .gf-bucket-stat.loss { color: var(--loss); }
+
+  .gf-recs {
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-left: 2px solid var(--gold);
+    border-radius: 2px;
+    padding: 24px 28px;
+    margin-bottom: 32px;
+  }
+  .gf-rec {
+    padding: 14px 0;
+    border-bottom: 1px solid var(--hairline);
+    font-family: var(--serif);
+    font-size: 14.5px;
+    line-height: 1.55;
+    color: var(--ink-soft);
+    letter-spacing: -0.005em;
+  }
+  .gf-rec:last-child { border-bottom: none; }
+  .gf-rec .badge {
+    display: inline-block;
+    margin-right: 12px;
+    padding: 2px 9px;
+    border-radius: 2px;
+    font-family: var(--sans);
+    font-size: 10px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-mid);
+    vertical-align: 1px;
+  }
+  .gf-rec .badge.warn { background: rgba(212,176,122,0.15); color: var(--warn); }
+  .gf-rec .badge.info { background: rgba(127,180,145,0.15); color: var(--win); }
+
   /* ─── Halt control ─────────────────────────────────────────── */
   .halt-row {
     display: flex;
@@ -888,6 +993,21 @@ HTML = """<!DOCTYPE html>
       <span class="sub">Attribution: who was right</span>
     </div>
     <div class="entry-list" id="tradesList"></div>
+  </div>
+
+  <!-- GAME FILM -->
+  <div class="section">
+    <div class="section-head">
+      <span class="dot"></span>
+      <h2>What the data says</h2>
+      <span class="sub" id="gfMeta">awaiting trades</span>
+    </div>
+    <div class="gf-recs" id="gfRecsCard">
+      <div class="gf-rec" style="border:none;color:var(--ink-mute);font-style:italic">
+        After enough closed trades, this card surfaces patterns the bot is too close to see — which categories pay, which confidence bands are noise, which symbols chronic-lose. Read-only: observations now, parameter changes are your call.
+      </div>
+    </div>
+    <div class="gf-grid" id="gfGrid"></div>
   </div>
 
   <!-- HALT CONTROL -->
@@ -1298,13 +1418,86 @@ async function refreshReview() {
   } catch (e) { console.error('review', e); }
 }
 
+// ── Game film ──────────────────────────────────────────────────
+function _gfBucketRows(bucket, label_fn) {
+  if (!bucket || !Object.keys(bucket).length) {
+    return '<div class="gf-rec" style="border:none;color:var(--ink-mute);font-style:italic">no data yet</div>';
+  }
+  const entries = Object.entries(bucket).slice(0, 8);
+  return entries.map(([k, v]) => {
+    const cls = v.avg_pnl > 0 ? 'win' : (v.avg_pnl < 0 ? 'loss' : '');
+    return `<div class="gf-bucket-row">
+      <div class="gf-bucket-name">${label_fn ? label_fn(k) : k}</div>
+      <div class="gf-bucket-stat">${v.trades}</div>
+      <div class="gf-bucket-stat">${v.win_rate.toFixed(0)}%</div>
+      <div class="gf-bucket-stat ${cls}">${(v.total_pnl>=0?'+':'')}\$${v.total_pnl.toFixed(2)}</div>
+    </div>`;
+  }).join('');
+}
+
+function _gfBlock(title, bucket, label_fn) {
+  return `<div class="gf-block">
+    <div class="gf-block-title">${title}</div>
+    <div class="gf-bucket-row" style="opacity:0.5">
+      <div class="gf-bucket-name" style="font-family:var(--sans);font-size:10px;text-transform:uppercase;letter-spacing:.1em">bucket</div>
+      <div class="gf-bucket-stat">N</div>
+      <div class="gf-bucket-stat">WR</div>
+      <div class="gf-bucket-stat">P&L</div>
+    </div>
+    ${_gfBucketRows(bucket, label_fn)}
+  </div>`;
+}
+
+async function refreshGameFilm() {
+  try {
+    const r = await api('/api/game-film');
+    if (!r.available) return;
+    const insights = r.insights || {};
+    const meta = insights.meta || {};
+    const recs = insights.recommendations || [];
+    const overall = insights.overall || {};
+
+    const ts = r.timestamp ? new Date(r.timestamp*1000) : new Date();
+    const tsLabel = r.live ? 'live · just computed' : `last computed ${ts.toLocaleTimeString([], {hour:'numeric', minute:'2-digit'})}`;
+    document.getElementById('gfMeta').textContent =
+      `${meta.trade_count||0} closed trades · ${meta.lookback_days||30}d window · ${tsLabel}`;
+
+    // Recommendations
+    const recsCard = document.getElementById('gfRecsCard');
+    if (!meta.ready) {
+      recsCard.innerHTML = `<div class="gf-rec" style="border:none;color:var(--ink-mute);font-style:italic">${meta.message || 'Game film waits for at least ' + (meta.min_required||5) + ' closed trades.'}</div>`;
+    } else if (!recs.length) {
+      recsCard.innerHTML = `<div class="gf-rec" style="border:none;color:var(--ink-mute);font-style:italic">No flagged patterns yet — the bot is operating within expected ranges across every dimension.</div>`;
+    } else {
+      recsCard.innerHTML = recs.map(rec =>
+        `<div class="gf-rec"><span class="badge ${rec.severity||'info'}">${(rec.kind||'').replace(/_/g,' ')}</span>${rec.summary||''}</div>`
+      ).join('');
+    }
+
+    // Grid of buckets
+    const grid = document.getElementById('gfGrid');
+    if (meta.ready) {
+      grid.innerHTML = [
+        _gfBlock('By consensus confidence', insights.by_confidence),
+        _gfBlock('By universe category', insights.by_category),
+        _gfBlock('By hold duration', insights.by_hold_duration),
+        _gfBlock('By symbol (top 8 by P&L)', insights.by_symbol),
+        _gfBlock('By exit reason', insights.by_exit_reason),
+        _gfBlock('By consensus pattern', insights.by_consensus_pattern),
+      ].join('');
+    } else {
+      grid.innerHTML = '';
+    }
+  } catch (e) { console.error('gf', e); }
+}
+
 async function refreshAll() {
   try {
     renderSessions();
     await Promise.all([
       refreshStatus(), refreshEquity(), refreshScoreboard(),
       refreshPositions(), refreshDecisions(), refreshSkips(), refreshTrades(),
-      refreshBrief(), refreshReview(),
+      refreshBrief(), refreshReview(), refreshGameFilm(),
     ]);
   } catch (e) { console.error(e); }
 }

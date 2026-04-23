@@ -1,4 +1,4 @@
-"""Velox Edge main loop.
+"""Velox Core main loop.
 
 Schedule:
   - 5 consensus sessions per trading day at 9:35, 11:00, 13:30, 15:00, 15:45 ET
@@ -21,7 +21,7 @@ import pytz
 from loguru import logger
 
 from velox_edge import (
-    broker, config, consensus, market_brief, ratchet, review,
+    broker, config, consensus, game_film, market_brief, ratchet, review,
     scanner, sizing, state,
 )
 from velox_edge.universe import UNIVERSE
@@ -29,9 +29,9 @@ from velox_edge.universe import UNIVERSE
 
 ET = pytz.timezone("America/New_York")
 
-# Edge's cadence is sparser — 8 sessions/day. The model is looking for
-# clear contrarian extremes; firing every 30 min produces noise on a small
-# universe. Sessions skew toward open and close where extremes live.
+# Session schedule (ET, 24h). Tuple of (HH, MM, label).
+# Dense cadence: every 30 min during regular hours = 14 sessions/day. Bot
+# is always near "the next session" so it doesn't miss a fast move by hours.
 SESSIONS: List[Tuple[int, int, str]] = [
     (9, 40,  "open_settle"),     # 5 min after open, let spreads tighten
     (10, 15, "morning_drift"),
@@ -94,9 +94,9 @@ async def run_session(label: str):
 
     equity = await broker.get_equity()
 
-    # Edge runs almost entirely on the scanner — small ETF anchor + 30+ scanner picks.
-    # Bigger pool than vanilla because contrarian setups are rarer per-name.
-    scan = await scanner.daily_scan(target_count=35)
+    # Combined universe: fixed anchor list + today's dynamic scanner overlay.
+    # First session of the day refreshes the scanner; subsequent sessions reuse cache.
+    scan = await scanner.daily_scan(target_count=20)
     full_universe = list(UNIVERSE) + list(scan["tickers"])
     snaps = await broker.get_snapshots(full_universe)
     if not snaps:
@@ -304,11 +304,9 @@ async def flatten_all(reason: str = "eod_flatten"):
         await _close_position_by_symbol(p["symbol"], reason)
     state.audit("flatten_all", "info", f"reason={reason} closed={len(positions)}")
 
-
 async def _flatten_stale_positions(max_days: int):
     """Force-close any position held longer than max_days. Edge keeps winners
-    overnight but caps the hold so a thesis can't drift into purgatory.
-    """
+    overnight but caps the hold so a thesis cannot drift into purgatory."""
     open_trades = state.get_open_trades()
     cutoff = time.time() - (max_days * 24 * 3600)
     stale = [t for t in open_trades if (t.get("entry_time") or 0) < cutoff]
@@ -317,6 +315,7 @@ async def _flatten_stale_positions(max_days: int):
         if sym:
             logger.info(f"⏳ Stale position close: {sym} held > {max_days}d")
             await _close_position_by_symbol(sym, f"max_hold_{max_days}d")
+
 
 
 # ── Main loop orchestration ────────────────────────────────────────
@@ -330,7 +329,7 @@ def _session_key(now: datetime, label: str) -> str:
 
 
 async def main_loop():
-    logger.info("⚡ Velox Edge starting")
+    logger.info("⚡ Velox Core starting")
     state.init_db()
     state.audit("startup", "info", "velox-core booted")
 
@@ -358,8 +357,8 @@ async def main_loop():
 async def _tick():
     now = _now_et()
 
-    # 1. EOD flatten check — Edge can hold overnight by default, so this only
-    # fires if EDGE_FORCE_FLATTEN_AT_EOD=true OR a position has hit its max hold.
+    # 1. EOD flatten check — Edge can hold overnight by default; only fires
+    # if EDGE_FORCE_FLATTEN_AT_EOD=true OR a position has hit max hold days.
     eod = _eod_flatten_today(now)
     eod_key = f"{now.date().isoformat()}_eod_flatten"
     if now >= eod and eod_key not in _executed_today and await broker.is_market_open():
@@ -367,7 +366,6 @@ async def _tick():
             logger.info("⏰ EOD flatten triggered (EDGE_FORCE_FLATTEN_AT_EOD=true)")
             await flatten_all("eod_flatten")
         else:
-            # Selective flatten: only positions held > MAX_HOLD_DAYS
             await _flatten_stale_positions(max_days=config.EDGE_MAX_HOLD_DAYS)
         _executed_today.add(eod_key)
 
@@ -400,6 +398,27 @@ async def _tick():
             logger.error(f"Daily review error: {e}")
             state.audit("daily_review_error", "error", str(e))
         _executed_today.add(review_key)
+
+    # 3b. Game film — fires 10 min after daily review with the day's data already in.
+    gf_dt = ET.localize(
+        datetime.combine(
+            now.date(),
+            dtime(config.DAILY_REVIEW_HOUR_ET, config.DAILY_REVIEW_MIN_ET + 10),
+        )
+    )
+    gf_key = f"{now.date().isoformat()}_game_film"
+    if (
+        now >= gf_dt
+        and gf_key not in _executed_today
+        and now.weekday() < 5
+    ):
+        try:
+            logger.info("🎬 Computing game film…")
+            game_film.write_game_film()
+        except Exception as e:
+            logger.error(f"Game film error: {e}")
+            state.audit("game_film_error", "error", str(e))
+        _executed_today.add(gf_key)
 
     # 4. Ratchet on open positions (every tick during market hours)
     if await broker.is_market_open():

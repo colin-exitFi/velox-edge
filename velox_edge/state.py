@@ -113,6 +113,14 @@ CREATE TABLE IF NOT EXISTS daily_reviews (
 );
 
 CREATE INDEX IF NOT EXISTS idx_reviews_date ON daily_reviews(review_date);
+
+CREATE TABLE IF NOT EXISTS game_film (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp REAL NOT NULL,
+    insights_json TEXT NOT NULL    -- full insights dict serialized
+);
+
+CREATE INDEX IF NOT EXISTS idx_game_film_ts ON game_film(timestamp);
 """
 
 
@@ -467,6 +475,34 @@ def recent_daily_reviews(limit: int = 14) -> List[Dict]:
             "SELECT * FROM daily_reviews ORDER BY timestamp DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# ── Game film ──────────────────────────────────────────────────────
+
+
+def record_game_film(insights: Dict) -> int:
+    with _conn() as c:
+        cur = c.execute(
+            "INSERT INTO game_film (timestamp, insights_json) VALUES (?, ?)",
+            (time.time(), json.dumps(insights)),
+        )
+        return cur.lastrowid
+
+
+def latest_game_film() -> Optional[Dict]:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT * FROM game_film ORDER BY timestamp DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d["insights"] = json.loads(d.get("insights_json") or "{}")
+        except Exception:
+            d["insights"] = {}
+        d.pop("insights_json", None)
+        return d
 
 
 # ── Equity history (JSON for fast charting) ────────────────────────
